@@ -5,29 +5,67 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+
+	"gopkg.in/yaml.v2"
 )
 
+type Config struct {
+	Proxy struct {
+		ListenPort string `yaml:"listen_port"`
+	} `yaml:"proxy"`
+
+	Servers []struct {
+		Name string `yaml:"name"`
+		URL  string `yaml:"url"`
+	} `yaml:"servers"`
+
+	Routing struct {
+		Rules []struct {
+			Model  string `yaml:"model"`
+			Server string `yaml:"server"`
+		} `yaml:"rules"`
+		DefaultServer string `yaml:"default_server"`
+	} `yaml:"routing"`
+}
+
 type ReverseProxy struct {
-	server1 string
-	server2 string
+	config *Config
 }
 
 func main() {
-	// Create proxy server
-	proxy := &ReverseProxy{
-		server1: "http://localhost:5001",
-		server2: "http://localhost:5002",
+	config, err := loadConfig("config.yml")
+	if err != nil {
+		log.Fatalf("Failed to load config: %v", err)
 	}
 
-	// Start server on port 8080
-	fmt.Println("Starting proxy server on :5003")
-	if err := http.ListenAndServe(":5003", proxy); err != nil {
+	proxy := &ReverseProxy{
+		config: config,
+	}
+
+	fmt.Println("Starting proxy server on", config.Proxy.ListenPort)
+	if err := http.ListenAndServe(config.Proxy.ListenPort, proxy); err != nil {
 		log.Fatal("ListenAndServe:", err)
 	}
+}
+
+func loadConfig(path string) (*Config, error) {
+	data, err := ioutil.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var config Config
+	err = yaml.Unmarshal(data, &config)
+	if err != nil {
+		return nil, err
+	}
+
+	return &config, nil
 }
 
 func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -62,14 +100,14 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Extracted model property: %s", model)
 	} else {
 		log.Printf("No 'model' property found in the request body")
+		model = "" // Use default routing
 	}
 
 	// Restore the request body for further use
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	//log.Printf("Request body: %s", string(bodyBytes))
 
-	// Determine target based on URL path
-	target := p.targetRoute(model)
+	// Determine target based on the routing rules
+	target := p.getTarget(model)
 
 	// Parse target URL
 	targetURL, err := url.Parse(target)
@@ -109,19 +147,38 @@ func (p *ReverseProxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	proxy.ServeHTTP(w, r)
 }
 
-// targetRoute determines which server the request should be routed to. Defaults to server1, always
-func (p *ReverseProxy) targetRoute(modelName string) string {
-	switch modelName {
-	case "QwQ-32B":
-		return p.server1
-	case "Q25_32B-coder-5bpw":
-		return p.server1
+func (p *ReverseProxy) getTarget(model string) string {
+	// Build a map of model to server name
+	routingMap := make(map[string]string)
+	for _, rule := range p.config.Routing.Rules {
+		routingMap[rule.Model] = rule.Server
 	}
 
-	return p.server1
+	// Get server name based on model, or default server
+	serverName := routingMap[model]
+	if serverName == "" {
+		serverName = p.config.Routing.DefaultServer
+	}
+
+	// Find the server URL based on server name
+	for _, server := range p.config.Servers {
+		if server.Name == serverName {
+			return server.URL
+		}
+	}
+
+	// Fallback to default server if not found
+	for _, server := range p.config.Servers {
+		if server.Name == p.config.Routing.DefaultServer {
+			return server.URL
+		}
+	}
+
+	// Should not reach here if default server is configured correctly
+	log.Printf("Warning: Default server not found, using first server")
+	return p.config.Servers[0].URL
 }
 
-// isStreamingResponse checks if the response is a streaming response
 func isStreamingResponse(resp *http.Response) bool {
 	return resp.Header.Get("Transfer-Encoding") == "chunked" ||
 		resp.Header.Get("Content-Type") == "text/event-stream" ||
