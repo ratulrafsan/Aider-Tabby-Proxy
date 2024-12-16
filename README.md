@@ -1,4 +1,4 @@
-## Aider-Proxy
+## Aider-Tabby-Proxy
 
 TabbyAPI can't load & server more than one model at the same time. It loads/unloads based on request. Very time-consuming.
 I don't want to dig into TabbyAPI's code and add patches to it right now.
